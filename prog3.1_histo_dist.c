@@ -143,7 +143,11 @@ void Find_bins(
         bin = Which_bin(local_data[i], bin_maxes, bin_count, min_meas);
       Then, calculate the global sum using collective communication.
    */
-/* TODO */
+   for (int i = 0;i < local_data_count;i++) {
+      int bin = Which_bin(local_data[i], bin_maxes, bin_count, min_meas);
+      loc_bin_cts[bin] ++;
+   }
+   MPI_Reduce(loc_bin_cts, bin_counts, bin_count, MPI_FLOAT, MPI_SUM, 0, comm);
    
 }  /* Find_bins */
 
@@ -151,8 +155,16 @@ void Find_bins(
 /*---------------------------------------------------------------------*/
 int Which_bin(float data, float bin_maxes[], int bin_count, 
       float min_meas) {
-/* TODO */
-
+   if (min_meas <= data && data < bin_maxes[0]) {
+      return 0;
+   }
+   for (int i = 1;i < bin_count;i++) {
+      if (bin_maxes[i-1] <= data && data < bin_maxes[i]) {
+         return i;
+      }
+   }
+   // impossible
+   return -1;
 }  /* Which_bin */
 
 
