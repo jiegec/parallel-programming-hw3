@@ -144,12 +144,23 @@ void run(int n, double **matrix, double *vector) {
         flat_matrix[i * n + j] = matrix[i][j];
       }
     }
+    printf("Now begins\n");
   }
 
   double time_before_scatter = MPI_Wtime();
-  MPI_Scatter(flat_matrix, 1, block_col_mpi_t, local_matrix, n * local_n,
+  int *sendcounts = new int[comm_sz];
+  int *displs = new int[comm_sz];
+  for (int i = 0;i < comm_sz;i++) {
+    sendcounts[i] = 1;
+    displs[i] = i;
+  }
+  MPI_Scatterv(flat_matrix, sendcounts, displs, block_col_mpi_t, local_matrix, n * local_n,
               MPI_DOUBLE, 0, comm);
-  MPI_Scatter(vector, local_n, MPI_DOUBLE, local_vector, local_n, MPI_DOUBLE, 0,
+  for (int i = 0;i < comm_sz;i++) {
+    sendcounts[i] = local_n;
+    displs[i] = i * local_n;
+  }
+  MPI_Scatterv(vector, sendcounts, displs, MPI_DOUBLE, local_vector, local_n, MPI_DOUBLE, 0,
               comm);
   double time_after_scatter = MPI_Wtime();
   MPI_Barrier(comm);
@@ -176,7 +187,9 @@ void run(int n, double **matrix, double *vector) {
     answer = new double[n];
     MPI_Gather(local_ans, local_n, MPI_DOUBLE, answer, local_n, MPI_DOUBLE, 0,
                comm);
+    double time_before_serial = MPI_Wtime();
     serial(n, matrix, vector, &expected);
+    double time_after_serial = MPI_Wtime();
     double loss = 0;
     for (int i = 0; i < n; i++) {
       loss += (answer[i] - expected[i]) * (answer[i] - expected[i]);
@@ -184,6 +197,7 @@ void run(int n, double **matrix, double *vector) {
     printf("loss: %lf\n", loss);
     printf("time(scatter): %lf\n", time_after_scatter - time_before_scatter);
     printf("time(calc): %lf\n", time_after_calc - time_before_calc);
+    printf("time(serial): %lf\n", time_after_serial - time_before_serial);
   } else {
     MPI_Gather(local_ans, local_n, MPI_DOUBLE, answer, local_n, MPI_DOUBLE, 0,
                comm);
