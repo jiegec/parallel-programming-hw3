@@ -1,3 +1,4 @@
+#include <cmath>
 #include <ctime>
 #include <iostream>
 #include <mpi.h>
@@ -108,17 +109,39 @@ void run(int n, double **matrix, double *vector) {
   comm = MPI_COMM_WORLD;
   MPI_Comm_size(comm, &comm_sz);
   MPI_Comm_rank(comm, &my_rank);
+  int sqrt_comm_sz = sqrt(comm_sz);
 
-  MPI_Datatype block_col_mpi_t;
+  // every row a comm
+  MPI_Comm row_comm;
+  int my_row_rank;
+  MPI_Comm_split(MPI_COMM_WORLD, my_rank / sqrt_comm_sz, my_rank, &row_comm);
+
+  // first col a comm
+  MPI_Group world_group;
+  MPI_Comm_group(MPI_COMM_WORLD, &world_group);
+
+  int *ranks = new int[sqrt_comm_sz];
+  for (int i = 0; i < sqrt_comm_sz; i++) {
+    ranks[i] = i * sqrt_comm_sz;
+  }
+
+  MPI_Group col_group;
+  MPI_Group_incl(world_group, sqrt_comm_sz, ranks, &col_group);
+
+  // Create a new communicator based on the group
+  MPI_Comm col_comm;
+  MPI_Comm_create_group(MPI_COMM_WORLD, col_group, 0, &col_comm);
+
+  MPI_Datatype block_sub_mpi_t;
   MPI_Datatype vect_mpi_t;
 
-  int local_n = n / comm_sz;
-  double *local_matrix = new double[local_n * n];
+  int local_n = n / sqrt_comm_sz;
+  double *local_matrix = new double[local_n * local_n];
   double *local_vector = new double[local_n];
-  double *local_sum = new double[n];
   double *local_ans = new double[local_n];
+  double *local_sum = new double[local_n];
 
-  if (n % comm_sz) {
+  if (n % comm_sz || (sqrt_comm_sz * sqrt_comm_sz != comm_sz)) {
     if (my_rank == 0) {
       printf("Bad n and comm_sz!\n");
     }
@@ -128,12 +151,12 @@ void run(int n, double **matrix, double *vector) {
 
   /* n blocks each containing local_n elements */
   /* The start of each block is n doubles beyond the preceding block */
-  MPI_Type_vector(n, local_n, n, MPI_DOUBLE, &vect_mpi_t);
+  MPI_Type_vector(local_n, local_n, n, MPI_DOUBLE, &vect_mpi_t);
 
   /* Resize the new type so that it has the extent of local_n doubles */
   MPI_Type_create_resized(vect_mpi_t, 0, local_n * sizeof(double),
-                          &block_col_mpi_t);
-  MPI_Type_commit(&block_col_mpi_t);
+                          &block_sub_mpi_t);
+  MPI_Type_commit(&block_sub_mpi_t);
 
   double *flat_matrix = NULL;
   if (my_rank == 0) {
@@ -150,15 +173,19 @@ void run(int n, double **matrix, double *vector) {
   double time_before_scatter = MPI_Wtime();
   int *sendcounts = new int[comm_sz];
   int *displs = new int[comm_sz];
-  for (int i = 0; i < comm_sz; i++) {
-    sendcounts[i] = 1;
-    displs[i] = i;
+  for (int i = 0; i < sqrt_comm_sz; i++) {
+    for (int j = 0; j < sqrt_comm_sz; j++) {
+      sendcounts[i * sqrt_comm_sz + j] = 1;
+      displs[i * sqrt_comm_sz + j] = i * sqrt_comm_sz * local_n + j;
+    }
   }
-  MPI_Scatterv(flat_matrix, sendcounts, displs, block_col_mpi_t, local_matrix,
-               n * local_n, MPI_DOUBLE, 0, comm);
-  for (int i = 0; i < comm_sz; i++) {
-    sendcounts[i] = local_n;
-    displs[i] = i * local_n;
+  MPI_Scatterv(flat_matrix, sendcounts, displs, block_sub_mpi_t, local_matrix,
+               local_n * local_n, MPI_DOUBLE, 0, comm);
+  for (int i = 0; i < sqrt_comm_sz; i++) {
+    for (int j = 0; j < sqrt_comm_sz; j++) {
+      sendcounts[i * sqrt_comm_sz + j] = local_n;
+      displs[i * sqrt_comm_sz + j] = j * local_n;
+    }
   }
   MPI_Scatterv(vector, sendcounts, displs, MPI_DOUBLE, local_vector, local_n,
                MPI_DOUBLE, 0, comm);
@@ -166,27 +193,21 @@ void run(int n, double **matrix, double *vector) {
   MPI_Barrier(comm);
   double time_before_calc = MPI_Wtime();
 
-  for (int i = 0; i < n; i++) {
+  for (int i = 0; i < local_n; i++) {
     local_sum[i] = 0.0;
     for (int j = 0; j < local_n; j++) {
       local_sum[i] += local_matrix[i * local_n + j] * local_vector[j];
     }
   }
 
-  int *recv_counts = new int[comm_sz];
-  for (int i = 0; i < comm_sz; i++) {
-    recv_counts[i] = local_n;
-  }
-
-  MPI_Reduce_scatter(local_sum, local_ans, recv_counts, MPI_DOUBLE, MPI_SUM,
-                     comm);
+  MPI_Reduce(local_sum, local_ans, local_n, MPI_DOUBLE, MPI_SUM, 0, row_comm);
   MPI_Barrier(comm);
   double time_after_calc = MPI_Wtime();
 
   if (my_rank == 0) {
     answer = new double[n];
     MPI_Gather(local_ans, local_n, MPI_DOUBLE, answer, local_n, MPI_DOUBLE, 0,
-               comm);
+               col_comm);
     double time_before_serial = MPI_Wtime();
     serial(n, matrix, vector, &expected);
     double time_after_serial = MPI_Wtime();
@@ -198,9 +219,9 @@ void run(int n, double **matrix, double *vector) {
     printf("time(scatter): %lf\n", time_after_scatter - time_before_scatter);
     printf("time(calc): %lf\n", time_after_calc - time_before_calc);
     printf("time(serial): %lf\n", time_after_serial - time_before_serial);
-  } else {
+  } else if (my_rank % sqrt_comm_sz == 0) {
     MPI_Gather(local_ans, local_n, MPI_DOUBLE, answer, local_n, MPI_DOUBLE, 0,
-               comm);
+               col_comm);
   }
   MPI_Finalize();
 }
